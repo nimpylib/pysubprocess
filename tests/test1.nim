@@ -84,3 +84,56 @@ suite "subprocess":
       "node -e \"console.log('hello')\"")
     check status == 0
     check output == "hello"
+
+  test "timeout raises the public exception with captured fields":
+    try:
+      discard run(["node", "-e",
+        "process.stdout.write('partial'); setTimeout(() => {}, 1000)"],
+        stdout = PIPE, stderr = PIPE, timeout = 0.05)
+      fail()
+    except TimeoutExpired as error:
+      check error.cmd[0] == "node"
+      check error.timeout == 0.05
+      check error.stdout == error.output
+
+  test "Popen communicate and attributes":
+    let child = Popen(["node", "-e",
+      "process.stdin.on('data', d => process.stdout.write(d)); process.stdin.on('end', () => process.stderr.write('done'))"],
+      stdin = PIPE, stdout = PIPE, stderr = PIPE)
+    check child.args[0] == "node"
+    check child.returncode.isNone
+    let (childOut, childErr) = child.communicate("hello")
+    check childOut == "hello"
+    check childErr == "done"
+    check child.returncode.get == 0
+    check child.poll().get == 0
+
+  test "Popen wait returns the exit status":
+    let child = Popen(["node", "-e", "process.exit(4)"],
+      stdout = DEVNULL, stderr = DEVNULL)
+    check child.wait() == 4
+    check child.returncode.get == 4
+
+  when not defined(js):
+    test "Popen wait timeout leaves child available for termination":
+      let child = Popen(["node", "-e", "setTimeout(() => {}, 1000)"],
+        stdout = DEVNULL, stderr = DEVNULL)
+      expect TimeoutExpired:
+        discard child.wait(0.02)
+      child.kill()
+      check child.wait() != 0
+
+  test "encoding compatibility parameters are accepted":
+    check check_output(["node", "-e", "process.stdout.write('ok')"],
+      encoding = "utf-8", errors = "strict", text = true,
+      universal_newlines = true) == "ok"
+    check getoutput("node -e \"process.stdout.write('ok')\"",
+      encoding = "utf-8", errors = "strict") == "ok"
+
+  test "generated string overloads match argv overloads":
+    check call("node", stdin = DEVNULL, stdout = DEVNULL, stderr = DEVNULL) == 0
+    check check_output("node -e \"process.stdout.write('ok')\"",
+      shell = true) == "ok"
+    let child = Popen("node", stdin = DEVNULL, stdout = DEVNULL,
+      stderr = DEVNULL)
+    check child.wait() == 0

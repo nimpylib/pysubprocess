@@ -13,14 +13,18 @@ function pysubprocessEnvironment(envPairs) {
   return env;
 }
 
-function pysubprocessNodeSpawnSync(command, args, input, cwd, shell, envPairs) {
+function pysubprocessNodeSpawnSync(
+    command, args, input, cwd, shell, envPairs, timeoutMs, stdinMode) {
   const options = {
     encoding: 'utf8',
     input: input,
     maxBuffer: 64 * 1024 * 1024,
     shell: shell
   };
+  options.stdio = [stdinMode === 0 ? 'inherit' :
+                   stdinMode === 3 ? 'ignore' : 'pipe', 'pipe', 'pipe'];
   if (cwd.length !== 0) options.cwd = cwd;
+  if (timeoutMs >= 0) options.timeout = timeoutMs;
   const env = pysubprocessEnvironment(envPairs);
   if (env !== undefined) options.env = env;
   const child = require('node:child_process').spawnSync(command, args, options);
@@ -28,7 +32,8 @@ function pysubprocessNodeSpawnSync(command, args, input, cwd, shell, envPairs) {
     status: child.status === null ? -1 : child.status,
     stdout: child.stdout === null ? '' : child.stdout,
     stderr: child.stderr === null ? '' : child.stderr,
-    error: child.error === undefined ? '' : child.error.message
+    error: child.error === undefined ? '' : child.error.message,
+    timedOut: child.error !== undefined && child.error.code === 'ETIMEDOUT'
   };
 }
 
@@ -42,7 +47,7 @@ function pysubprocessDenoResult(child) {
   };
 }
 
-function pysubprocessDenoCommand(command, args, cwd, shell, envPairs) {
+function pysubprocessDenoCommand(command, args, cwd, shell, envPairs, stdinMode) {
   let executable = command;
   let commandArgs = args;
   if (shell) {
@@ -56,7 +61,8 @@ function pysubprocessDenoCommand(command, args, cwd, shell, envPairs) {
   }
   const options = {
     args: commandArgs,
-    stdin: 'null',
+    stdin: stdinMode === 0 ? 'inherit' :
+           stdinMode === 3 ? 'null' : 'piped',
     stdout: 'piped',
     stderr: 'piped'
   };
@@ -71,37 +77,60 @@ function pysubprocessDenoCommand(command, args, cwd, shell, envPairs) {
 
 async function pysubprocessDenoInputBridgeMain() {
   const spec = JSON.parse(Deno.readTextFileSync(Deno.args[0]));
-  spec.options.stdin = 'piped';
   const child = new Deno.Command(spec.executable, spec.options).spawn();
-  const writer = child.stdin.getWriter();
-  await writer.write(new TextEncoder().encode(spec.input));
-  await writer.close();
+  let timedOut = false;
+  let timer;
+  if (spec.timeoutMs >= 0) {
+    timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill('SIGKILL'); } catch (_) {}
+    }, spec.timeoutMs);
+  }
+  if (spec.options.stdin === 'piped') {
+    const writer = child.stdin.getWriter();
+    await writer.write(new TextEncoder().encode(spec.input));
+    await writer.close();
+  }
   const output = await child.output();
-  Deno.stdout.writeSync(output.stdout);
-  Deno.stderr.writeSync(output.stderr);
-  Deno.exit(output.code);
+  if (timer !== undefined) clearTimeout(timer);
+  Deno.writeTextFileSync(spec.resultPath, JSON.stringify({
+    status: output.code,
+    stdout: new TextDecoder().decode(output.stdout),
+    stderr: new TextDecoder().decode(output.stderr),
+    error: '',
+    timedOut
+  }));
 }
 const pysubprocessDenoInputBridge =
   '(' + pysubprocessDenoInputBridgeMain.toString() + ')()';
 
-function pysubprocessDenoSpawnSync(command, args, input, cwd, shell, envPairs) {
+function pysubprocessDenoSpawnSync(
+    command, args, input, cwd, shell, envPairs, timeoutMs, stdinMode) {
   try {
     const spec = pysubprocessDenoCommand(
-      command, args, cwd, shell, envPairs);
-    if (input.length === 0)
-      return pysubprocessDenoResult(
+      command, args, cwd, shell, envPairs, stdinMode);
+    if (stdinMode !== 1 && input.length === 0 && timeoutMs < 0) {
+      const result = pysubprocessDenoResult(
         new Deno.Command(spec.executable, spec.options).outputSync());
+      result.timedOut = false;
+      return result;
+    }
 
     // outputSync rejects piped stdin, so a synchronous Deno.Command runs a
     // small bridge that uses Deno.Command.spawn() to feed the input.
     const specPath = Deno.makeTempFileSync({
       prefix: 'pysubprocess-', suffix: '.json'
     });
+    const resultPath = Deno.makeTempFileSync({
+      prefix: 'pysubprocess-result-', suffix: '.json'
+    });
     try {
       Deno.writeTextFileSync(specPath, JSON.stringify({
         executable: spec.executable,
         options: spec.options,
-        input: input
+        input: input,
+        timeoutMs: timeoutMs,
+        resultPath: resultPath
       }));
       const bridge = new Deno.Command(Deno.execPath(), {
         args: ['eval', pysubprocessDenoInputBridge, specPath],
@@ -109,16 +138,20 @@ function pysubprocessDenoSpawnSync(command, args, input, cwd, shell, envPairs) {
         stdout: 'piped',
         stderr: 'piped'
       }).outputSync();
-      return pysubprocessDenoResult(bridge);
+      if (!bridge.success)
+        throw new Error(new TextDecoder().decode(bridge.stderr));
+      return JSON.parse(Deno.readTextFileSync(resultPath));
     } finally {
       Deno.removeSync(specPath);
+      Deno.removeSync(resultPath);
     }
   } catch (error) {
     return {
       status: -1,
       stdout: '',
       stderr: '',
-      error: String(error.message || error)
+      error: String(error.message || error),
+      timedOut: false
     };
   }
 }
@@ -127,7 +160,7 @@ function pysubprocessDenoSpawnSync(command, args, input, cwd, shell, envPairs) {
 type JsRunResult = JsObject
 
 proc spawnSync(command: cstring; args: seq[cstring]; input, cwd: cstring;
-    shell: bool; envPairs: JsObject): JsRunResult
+    shell: bool; envPairs: JsObject; timeoutMs, stdinMode: int): JsRunResult
     {.importByNodeOrDeno(
       "pysubprocessNodeSpawnSync", "pysubprocessDenoSpawnSync").}
 
@@ -135,6 +168,7 @@ proc status(res: JsRunResult): int {.importjs: "#.status".}
 proc stdout(res: JsRunResult): cstring {.importjs: "#.stdout".}
 proc stderr(res: JsRunResult): cstring {.importjs: "#.stderr".}
 proc error(res: JsRunResult): cstring {.importjs: "#.error".}
+proc timedOut(res: JsRunResult): bool {.importjs: "#.timedOut".}
 proc jsNull(ignored: int): JsObject {.importjs: "(#, null)".}
 proc asJsObject(values: seq[cstring]): JsObject {.importjs: "#".}
 
@@ -146,32 +180,23 @@ proc environmentPairs(env: StringTableRef): seq[cstring] =
 
 proc runBackend*(completed: var CompletedProcess; command: string;
     commandArgs: openArray[string]; input: string; shell: bool; cwd: string;
-    env: StringTableRef; stdoutMode, stderrMode: Stdio) =
+    env: StringTableRef; stdinMode, stdoutMode, stderrMode: Stdio;
+    timeout: float) =
   var jsArgs = newSeqOfCap[cstring](commandArgs.len)
   for arg in commandArgs:
     jsArgs.add cstring(arg)
   let pairs = environmentPairs(env)
   let jsEnv = if env == nil: jsNull(0) else: asJsObject(pairs)
+  let timeoutMs = if timeout < 0: -1 else: max(0, int(timeout * 1000.0))
   let child = spawnSync(cstring(command), jsArgs, cstring(input), cstring(cwd),
-    shell, jsEnv)
-  if child.error.len != 0:
+    shell, jsEnv, timeoutMs, ord(stdinMode))
+  if child.error.len != 0 and not child.timedOut:
     raise newException(OSError, $child.error)
   completed.returncode = child.status
   let childStdout = $child.stdout
   let childStderr = $child.stderr
-  case stdoutMode
-  of PIPE: completed.stdout = childStdout
-  of DEVNULL: discard
-  of INHERIT:
-    if childStdout.len != 0: writeParentStdout childStdout
-  of STDOUT: discard # validated by the public API
-  case stderrMode
-  of PIPE: completed.stderr = childStderr
-  of STDOUT:
-    if stdoutMode == PIPE:
-      completed.stdout.add childStderr
-    elif stdoutMode == INHERIT and childStderr.len != 0:
-      writeParentStdout childStderr
-  of DEVNULL: discard
-  of INHERIT:
-    if childStderr.len != 0: writeParentStderr childStderr
+  (completed.stdout, completed.stderr) = routeOutput(stdoutMode, stderrMode,
+    childStdout, childStderr)
+  if child.timedOut:
+    raise newTimeoutExpired(commandLine(command, commandArgs), timeout,
+      completed.stdout, completed.stderr)

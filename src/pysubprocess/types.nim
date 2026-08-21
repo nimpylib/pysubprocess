@@ -10,10 +10,21 @@ type
     stdout*: string
     stderr*: string
 
-  CalledProcessError* = object of CatchableError
+  SubprocessError* = object of CatchableError
+    ## Base class for errors raised by this module.
+
+  CalledProcessError* = object of SubprocessError
     ## Raised when ``check=true`` and the command fails.
     returncode*: int
     cmd*: seq[string]
+    output*: string
+    stdout*: string
+    stderr*: string
+
+  TimeoutExpired* = object of SubprocessError
+    ## Raised when a child process exceeds a requested timeout.
+    cmd*: seq[string]
+    timeout*: float
     output*: string
     stdout*: string
     stderr*: string

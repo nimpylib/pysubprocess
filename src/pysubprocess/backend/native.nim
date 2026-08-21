@@ -1,48 +1,57 @@
-import std/[osproc, streams, strtabs]
+import std/[math, monotimes, os, osproc, streams, strtabs, times]
 
 import ../[types, utils]
+import ./native_common
+
+proc waitWithTimeout(process: Process; timeout: float): tuple[code: int,
+    timedOut: bool] =
+  let
+    timeoutMs = max(0, int(ceil(timeout * 1000.0)))
+    started = getMonoTime()
+  while process.running():
+    if (getMonoTime() - started).inMilliseconds >= timeoutMs:
+      process.kill()
+      return (process.waitForExit(), true)
+    sleep min(5, max(1, timeoutMs))
+  (process.waitForExit(), false)
 
 proc runBackend*(completed: var CompletedProcess; command: string;
     commandArgs: openArray[string]; input: string; shell: bool; cwd: string;
-    env: StringTableRef; stdoutMode, stderrMode: Stdio) =
-  var options = {poUsePath}
-  if shell:
-    options.incl poEvalCommand
-  if stderrMode == STDOUT:
-    options.incl poStdErrToStdOut
-
-  let useParentStreams = input.len == 0 and stdoutMode == INHERIT and
+    env: StringTableRef; stdinMode, stdoutMode, stderrMode: Stdio;
+    timeout: float) =
+  let useParentStreams = input.len == 0 and stdinMode == INHERIT and
+    stdoutMode == INHERIT and
     stderrMode == INHERIT
-  if useParentStreams:
-    options.incl poParentStreams
+  let options = processOptions(shell, useParentStreams, stderrMode)
 
   var process = startProcess(command, workingDir = cwd, args = commandArgs,
     env = env, options = options)
   try:
+    var timedOut = false
     if useParentStreams:
-      completed.returncode = process.waitForExit()
+      if timeout < 0:
+        completed.returncode = process.waitForExit()
+      else:
+        (completed.returncode, timedOut) = process.waitWithTimeout(timeout)
     else:
       let childInput = process.inputStream()
       if input.len != 0:
         childInput.write input
       childInput.close()
 
+      if timeout >= 0:
+        (completed.returncode, timedOut) = process.waitWithTimeout(timeout)
+
       let childStdout = process.outputStream().readAll()
       let childStderr = if stderrMode == STDOUT: ""
                         else: process.errorStream().readAll()
-      completed.returncode = process.waitForExit()
+      if timeout < 0:
+        completed.returncode = process.waitForExit()
 
-      case stdoutMode
-      of PIPE: completed.stdout = childStdout
-      of DEVNULL: discard
-      of INHERIT:
-        if childStdout.len != 0: writeParentStdout childStdout
-      of STDOUT: discard # validated by the public API
-      case stderrMode
-      of PIPE: completed.stderr = childStderr
-      of STDOUT: discard # already merged and routed as stdout
-      of DEVNULL: discard
-      of INHERIT:
-        if childStderr.len != 0: writeParentStderr childStderr
+      (completed.stdout, completed.stderr) = routeOutput(stdoutMode,
+        stderrMode, childStdout, childStderr)
+    if timedOut:
+      raise newTimeoutExpired(commandLine(command, commandArgs), timeout,
+        completed.stdout, completed.stderr)
   finally:
     process.close()
