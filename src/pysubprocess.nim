@@ -9,6 +9,11 @@ when defined(js):
   import std/jsffi
   from pkg/jscompat/utils/denoAttrs import importByNodeOrDeno
 
+  when defined(nodejs):
+    {.emit: """/*INCLUDESECTION*/
+    import { spawnSync as pysubprocessNodeSpawnSyncNative } from 'node:child_process';
+    """.}
+
   {.emit: """/*INCLUDESECTION*/
   function pysubprocessEnvironment(envPairs) {
     if (envPairs === null) return undefined;
@@ -28,7 +33,7 @@ when defined(js):
     if (cwd.length !== 0) options.cwd = cwd;
     const env = pysubprocessEnvironment(envPairs);
     if (env !== undefined) options.env = env;
-    const child = require('node:child_process').spawnSync(command, args, options);
+    const child = pysubprocessNodeSpawnSyncNative(command, args, options);
     return {
       status: child.status === null ? -1 : child.status,
       stdout: child.stdout === null ? '' : child.stdout,
