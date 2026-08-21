@@ -26,9 +26,17 @@ jobs:
     - uses: jiro4989/setup-nim-action@v2
       with:
         nim-version: ${{ env.nim-version }}
+    - uses: denoland/setup-deno@v2
+      with:
+        deno-version: v2.x
 
     - name: test
       run: nimble test
 
     - name: test js
       run: nimble test -b:js -d:nodejs
+
+    - name: test deno
+      run: |
+        nim js -o:bin/test-deno.js tests/test1.nim
+        deno run --allow-env --allow-read --allow-run bin/test-deno.js
