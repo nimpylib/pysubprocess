@@ -43,6 +43,11 @@ suite "subprocess":
     expect ValueError:
       discard run(["node"], stdout = STDOUT)
 
+  test "missing commands raise OSError":
+    expect OSError:
+      discard run(["pysubprocess-command-that-does-not-exist"],
+        capture_output = true)
+
   test "cwd and environment are forwarded":
     let env = newStringTable(modeCaseSensitive)
     env["PYSUBPROCESS_TEST"] = "works"

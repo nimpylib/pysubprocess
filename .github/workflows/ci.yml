@@ -38,5 +38,5 @@ jobs:
 
     - name: test deno
       run: |
-        nim js -o:bin/test-deno.js tests/test1.nim
-        deno run --allow-env --allow-read --allow-run bin/test-deno.js
+        nim js -o:/tmp/pysubprocess-deno-test.js tests/test1.nim
+        deno run --allow-env --allow-read --allow-write --allow-run /tmp/pysubprocess-deno-test.js
