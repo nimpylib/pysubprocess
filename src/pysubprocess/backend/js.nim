@@ -4,6 +4,24 @@ from pkg/jscompat/utils/denoAttrs import importByNodeOrDeno
 
 import ../[types, utils]
 
+template es6ImpNodeSpawn =
+    {.emit: """/*INCLUDESECTION*/
+    import { spawnSync } from 'node:child_process';
+    """.}
+const es6 = defined(esModule)
+when defined(nodejs):
+  when es6:
+    es6ImpNodeSpawn
+  else:
+    {.emit: """/*INCLUDESECTION*/
+    const { spawnSync } = require('node:child_process');
+    """.}
+elif defined(deno): discard
+elif es6:
+  # try to make our impl runnable
+  es6ImpNodeSpawn
+else:
+  {.error: "please -d:nodejs or -d:deno or -d:esModule".}
 {.emit: """/*INCLUDESECTION*/
 function pysubprocessEnvironment(envPairs) {
   if (envPairs === null) return undefined;
@@ -27,7 +45,7 @@ function pysubprocessNodeSpawnSync(
   if (timeoutMs >= 0) options.timeout = timeoutMs;
   const env = pysubprocessEnvironment(envPairs);
   if (env !== undefined) options.env = env;
-  const child = require('node:child_process').spawnSync(command, args, options);
+  const child = spawnSync(command, args, options);
   return {
     status: child.status === null ? -1 : child.status,
     stdout: child.stdout === null ? '' : child.stdout,
